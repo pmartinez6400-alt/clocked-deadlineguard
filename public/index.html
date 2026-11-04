@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeadlineGuard — what must I do, by when, and what if I don't?</title>
+<style>
+  :root { --ink:#1c2430; --mut:#5b6b7f; --line:#d8dee7; --bg:#f6f8fb; --card:#fff;
+          --red:#b3261e; --amber:#8a6100; --green:#146c2e; --blue:#175cd3; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  header { background:#10243e; color:#fff; padding:20px 24px; }
+  header h1 { margin:0 0 4px; font-size:24px; }
+  header p { margin:0; color:#c4d2e4; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#e7edf5; color:#10243e; margin-left:8px; vertical-align:middle;}
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  textarea { width:100%; min-height:150px; border:1px solid var(--line); border-radius:8px; padding:10px; font: 13px/1.5 ui-monospace, monospace; }
+  button { border:1px solid var(--line); background:#fff; border-radius:8px; padding:8px 14px; cursor:pointer; font-size:14px; }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; }
+  button.small { padding:4px 10px; font-size:13px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px,1fr)); gap:10px; }
+  .field b { display:block; font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  .risk { border-left:4px solid var(--red); background:#fdf1f0; padding:8px 12px; margin:6px 0; border-radius:4px; }
+  .risk small { color:var(--mut); display:block; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:999px; font-size:12px; font-weight:600; }
+  .act-now { background:#fbe3e1; color:var(--red); }
+  .schedule { background:#fdf3d7; color:var(--amber); }
+  .ignore { background:#e6e9ee; color:var(--mut); }
+  .ok { color:var(--green); font-weight:600; }
+  .bad { color:var(--red); font-weight:600; }
+  .mut { color:var(--mut); }
+  .quote { font-size:12.5px; color:var(--mut); max-width:340px; }
+  tr.superseded { opacity:.55; }
+  tr.approved { background:#f0faf2; }
+  tr.dismissed { opacity:.45; }
+  input.edit { width:110px; padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
+  .conflict { border-left:4px solid var(--amber); background:#fffaf0; padding:8px 12px; margin:6px 0; border-radius:4px; }
+  #status { min-height: 20px; color:var(--mut); }
+</style>
+</head>
+<body>
+<header>
+  <h1>DeadlineGuard <span class="badge" id="adapterBadge">adapter: …</span></h1>
+  <p>Paste a contract, policy or invoice. DeadlineGuard answers: <b>what must I do, by when, and what happens if I don't</b> — then a human approves before anything is filed.</p>
+</header>
+<main>
+  <section class="card">
+    <div class="row" style="margin-bottom:8px">
+      <strong>1 · Your document</strong>
+      <span class="mut">or load a sample:</span>
+      <span id="sampleButtons"></span>
+    </div>
+    <textarea id="docText" placeholder="Paste the full text of a contract, policy, renewal notice or invoice…"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="analyzeBtn">Analyze document</button>
+      <button id="compareBtn" title="Loads the two insurance samples and compares them">Compare old vs new policy (demo)</button>
+      <span id="status"></span>
+    </div>
+    <p class="mut" style="margin-bottom:0">Powered by the Clocked API: Extract → Guard/Inspect → Fill → Verify (grounding) → Decide. Two-document mode adds Compare + Rerank. Nothing is ever filed automatically.</p>
+  </section>
+
+  <section id="summaryCard" class="card" style="display:none">
+    <strong>2 · What the document says</strong>
+    <div class="grid" id="fieldsGrid" style="margin-top:10px"></div>
+    <div id="safetyLine" style="margin-top:10px"></div>
+    <div id="riskList"></div>
+    <div id="conflictList"></div>
+  </section>
+
+  <section id="queueCard" class="card" style="display:none">
+    <div class="row" style="justify-content:space-between">
+      <strong>3 · Approval queue — nothing files itself</strong>
+      <span class="row">
+        <button class="small" id="exportJson">Export approved (JSON)</button>
+        <button class="small" id="exportIcs">Export approved (.ics)</button>
+      </span>
+    </div>
+    <table>
+      <thead><tr><th>Obligation</th><th>Action</th><th>Due</th><th>Amount</th><th>Verified</th><th>Source</th><th></th></tr></thead>
+      <tbody id="queueBody"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+
+async function loadSamples() {
+  const samples = await api('/api/samples');
+  $('sampleButtons').innerHTML = samples.map(s =>
+    `<button class="small" data-sample="${s.key}">${esc(s.label)}</button>`).join(' ');
+  document.querySelectorAll('[data-sample]').forEach(btn => btn.addEventListener('click', async () => {
+    const { text } = await api('/api/samples/' + btn.dataset.sample);
+    $('docText').value = text;
+    $('status').textContent = 'Sample loaded — hit "Analyze document".';
+  }));
+  const health = await api('/api/health');
+  $('adapterBadge').textContent = 'Clocked adapter: ' + health.adapter + (health.adapter === 'mock' ? ' (offline demo mode)' : '');
+}
+
+function field(label, value) {
+  return `<div class="field"><b>${esc(label)}</b>${value ? esc(value) : '<span class="mut">—</span>'}</div>`;
+}
+
+function renderSummary(result, conflicts) {
+  $('summaryCard').style.display = 'block';
+  const f = result.fields || (result.documents && result.documents[0].fields) || {};
+  $('fieldsGrid').innerHTML = [
+    field('Provider', f.provider), field('Customer', f.customer),
+    field('Effective', f.effectiveDate), field('Renews', f.renewalDate),
+    field('Term ends', f.endDate), field('Notice deadline', f.noticeDeadline),
+    field('Monthly', f.monthlyAmount), field('Annual / premium', f.annualAmount),
+    field('Deductible', f.deductibleAmount),
+  ].join('');
+  const s = result.safety;
+  $('safetyLine').innerHTML = s
+    ? `<span class="${s.injection.detected ? 'bad' : 'ok'}">${s.injection.detected ? '⚠ Prompt-injection patterns detected in this document' : '✓ No prompt-injection patterns detected'}</span>
+       · <span class="mut">Personal data findings: ${s.piiFindings}${s.piiTypes.length ? ' (' + esc(s.piiTypes.join(', ')) + ')' : ''}</span>`
+    : '';
+  const risks = result.risks || [];
+  $('riskList').innerHTML = risks.length
+    ? '<h4 style="margin:12px 0 4px">⚠ Risky clauses (Guard / Inspect)</h4>' + risks.map(r =>
+        `<div class="risk"><b>${esc(r.label)}</b><small>“${esc(r.evidence)}”</small></div>`).join('')
+    : '';
+  $('conflictList').innerHTML = (conflicts && conflicts.length)
+    ? '<h4 style="margin:12px 0 4px">Conflicts between the documents (Compare)</h4>' + conflicts.map(c =>
+        `<div class="conflict"><b>${esc(c.field)}</b>: ${c.values.map(v => esc('$' + v.value)).join(' vs ')} — the <b>${esc(c.governingDocument)}</b> governs</div>`).join('')
+    : '';
+}
+
+function renderQueue(obligations) {
+  $('queueCard').style.display = 'block';
+  $('queueBody').innerHTML = obligations.map(ob => `
+    <tr class="${ob.status} ${ob.superseded ? 'superseded' : ''}" data-id="${ob.id}">
+      <td><b>${esc(ob.title)}</b>${ob.superseded ? ' <span class="tag ignore">superseded</span>' : ''}
+          ${ob.needsHumanReview ? ' <span class="tag schedule">needs review</span>' : ''}
+          <br><span class="mut">${esc(ob.reason || '')}</span>
+          ${ob.consequence ? `<br><span class="mut">If missed: ${esc(ob.consequence)}</span>` : ''}</td>
+      <td><span class="tag ${esc(ob.action)}">${esc(ob.action)}</span>${ob.confidence != null ? `<br><span class="mut">${Math.round(ob.confidence * 100)}% sure</span>` : ''}</td>
+      <td>${ob.dueDate ? `<input class="edit" type="date" value="${esc(ob.dueDate)}" data-edit="dueDate">` : '<span class="mut">no fixed date</span>'}
+          ${ob.dueBasis ? `<br><span class="mut">${esc(ob.dueBasis)}</span>` : ''}</td>
+      <td>${ob.amount ? `<input class="edit" value="${esc(ob.amount)}" data-edit="amount">` : '<span class="mut">—</span>'}</td>
+      <td>${ob.grounding && ob.grounding.verdict === 'grounded' ? '<span class="ok">✓ grounded</span>' : '<span class="bad">✗ unverified</span>'}</td>
+      <td class="quote">“${esc(ob.sourceQuote)}”</td>
+      <td>${ob.status === 'pending'
+            ? `<button class="small" data-act="approve">Approve</button> <button class="small" data-act="dismiss">Dismiss</button>`
+            : `<span class="tag ${ob.status === 'approved' ? 'schedule' : 'ignore'}">${esc(ob.status)}</span>`}</td>
+    </tr>`).join('');
+  document.querySelectorAll('#queueBody [data-act]').forEach(btn => btn.addEventListener('click', async () => {
+    const tr = btn.closest('tr');
+    const id = tr.dataset.id;
+    const edits = {};
+    tr.querySelectorAll('[data-edit]').forEach(inp => { edits[inp.dataset.edit] = inp.value; });
+    await api(`/api/obligations/${id}/${btn.dataset.act}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(edits),
+    });
+    refreshQueue();
+  }));
+}
+
+async function refreshQueue() {
+  const { obligations } = await api('/api/obligations');
+  if (obligations.length) renderQueue(obligations);
+}
+
+$('analyzeBtn').addEventListener('click', async () => {
+  $('status').textContent = 'Analyzing… (Extract → Guard → Fill → Verify → Decide)';
+  try {
+    const result = await api('/api/analyze', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: $('docText').value, title: 'Pasted document' }),
+    });
+    renderSummary(result);
+    await refreshQueue();
+    $('status').textContent = `Done — ${result.obligations.length} obligation(s) queued for your approval.`;
+  } catch (e) { $('status').textContent = 'Error: ' + e.message; }
+});
+
+$('compareBtn').addEventListener('click', async () => {
+  $('status').textContent = 'Comparing the two insurance documents…';
+  try {
+    const a = await api('/api/samples/insurance-old');
+    const b = await api('/api/samples/insurance-new');
+    const result = await api('/api/compare', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ textA: a.text, textB: b.text, titleA: 'Current policy', titleB: 'Renewal notice' }),
+    });
+    renderSummary(result, result.conflicts);
+    await refreshQueue();
+    $('status').textContent = `Done — governing document: ${result.governingDocument}. ${result.conflicts.length} conflict(s) found.`;
+  } catch (e) { $('status').textContent = 'Error: ' + e.message; }
+});
+
+$('exportJson').addEventListener('click', () => { window.location = '/api/export.json'; });
+$('exportIcs').addEventListener('click', () => { window.location = '/api/export.ics'; });
+
+loadSamples().catch(e => { $('status').textContent = 'Error: ' + e.message; });
+</script>
+</body>
+</html>
